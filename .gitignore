@@ -1,0 +1,7 @@
+archive/
+cache/
+checkpoints/
+wandb/
+*.out
+*.sh
+
