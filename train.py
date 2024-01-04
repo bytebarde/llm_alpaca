@@ -1,5 +1,5 @@
 """
-Training code modified from https://github.com/tatsu-lab/stanford_alpaca/blob/main/train.py
+LLM Training code modified from https://github.com/tatsu-lab/stanford_alpaca/blob/main/train.py
 """
 import copy
 from dataclasses import dataclass, field
@@ -8,14 +8,10 @@ from typing import Any, Dict, List, Optional
 import torch
 import transformers
 from datasets import load_dataset
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    DataCollatorWithPadding,
-    PreTrainedTokenizerBase,
-    Trainer,
-    TrainingArguments,
-)
+from peft import LoraConfig, PeftConfig, PeftModel, get_peft_model
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          DataCollatorWithPadding, PreTrainedTokenizerBase,
+                          Trainer, TrainingArguments)
 
 # Constants
 CACHE_DIRECTORY = "./cache/"
@@ -44,7 +40,27 @@ class ModelArguments:
 
 @dataclass
 class RunningArguments:
-    training_mode: str = field(default="debug")
+    training_mode: str = field(default="full")
+    # use_parallel: bool = field(default=False)
+
+
+@dataclass
+class LoraArguments:
+    use_lora: bool = field(default=False)
+    lora_r: int = field(default=64)
+    lora_alpha: int = field(default=128)
+    lora_dropout: float = field(default=0.0)
+    target_modules: List[str] = field(
+        default_factory=lambda: [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
+    )
 
 
 @dataclass
@@ -55,13 +71,10 @@ class TrainingArguments(TrainingArguments):
     per_device_train_batch_size: int = field(default=1)
     gradient_accumulation_steps: int = field(default=8)
     do_eval: bool = field(default=False)
-    evaluation_strategy: str = field(default="epoch")
+    evaluation_strategy: str = field(default="no")
     save_strategy: str = field(default="epoch")
     save_total_limit: int = field(default=5)
-    load_best_model_at_end: bool = field(default=True)
-    metric_for_best_model: str = field(default="loss")
-    greater_is_better: bool = field(default=False)
-    label_names = ["labels"]
+    label_names = ["labels"]  # has to be specified when using peft lora
 
     # Optimizer and Scheduler
     optim: str = field(default="adamw_torch")
@@ -78,6 +91,9 @@ class TrainingArguments(TrainingArguments):
 
 
 def pair_tokenize(sample, tokenizer):
+    """
+    Tokenizes a sample for model training, zeroing out loss for the prompt part.
+    """
     if sample["input"]:
         prompt_format = PROMPTS["with_input"]
         prompt = prompt_format.format(
@@ -116,6 +132,7 @@ def data_processing(tokenizer, mode):
     alpaca_dataset = load_dataset(
         dataset_path, cache_dir=f"{CACHE_DIRECTORY}/datasets/"
     )["train"]
+    # if the mode is debug, only select 100 samples as the trainset
     if mode == "debug":
         alpaca_dataset = alpaca_dataset.select(range(100))
     processed_dataset = alpaca_dataset.map(
@@ -125,25 +142,14 @@ def data_processing(tokenizer, mode):
         ["instruction", "input", "output", "text", "combined_text"]
     ).with_format("torch")
 
-    # Splitting the Dataset
-    train_test_split = processed_dataset.train_test_split(test_size=0.05, shuffle=True)
-
-    return train_test_split
+    return processed_dataset
 
 
 # Custom Data Collator
-# TODO: clean redundant params
 class CustomDataCollator(DataCollatorWithPadding):
-    def __init__(
-        self,
-        tokenizer: PreTrainedTokenizerBase,
-        padding=True,
-        max_length: Optional[int] = None,
-        pad_to_multiple_of: Optional[int] = None,
-        return_tensors: str = "pt",
-    ):
+    def __init__(self, tokenizer):
         super().__init__(
-            tokenizer, padding, max_length, pad_to_multiple_of, return_tensors
+            tokenizer,
         )
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -178,11 +184,16 @@ def initialize_tokenizer(model_name):
 
 def train():
     parser = transformers.HfArgumentParser(
-        (ModelArguments, TrainingArguments, RunningArguments)
+        (ModelArguments, TrainingArguments, RunningArguments, LoraArguments)
     )
-    model_args, training_args, running_args = parser.parse_args_into_dataclasses()
+    (
+        model_args,
+        training_args,
+        running_args,
+        lora_args,
+    ) = parser.parse_args_into_dataclasses()
     tokenizer = initialize_tokenizer(model_args.model_name_or_path)
-    train_test_split = data_processing(tokenizer, running_args.training_mode)
+    train_dataset = data_processing(tokenizer, running_args.training_mode)
     data_collator = CustomDataCollator(tokenizer)
     model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
@@ -191,15 +202,23 @@ def train():
     )
 
     model.resize_token_embeddings(len(tokenizer))
-    # TODO: fixup
-    training_args.fsdp_config["fsdp_transformer_layer_cls_to_wrap"] = "ParallelBlock"
 
-    # Training Configuration
+    # set up for lora
+    if lora_args.use_lora:
+        print("Using lora for training.")
+        config = LoraConfig(
+            r=lora_args.lora_r,
+            lora_alpha=lora_args.lora_alpha,
+            lora_dropout=lora_args.lora_dropout,
+            target_modules=lora_args.target_modules,
+        )
+        model = get_peft_model(model, config)
+
     trainer = Trainer(
         model=model,
         tokenizer=tokenizer,
-        train_dataset=train_test_split["train"],
-        eval_dataset=train_test_split["test"],
+        train_dataset=train_dataset,
+        eval_dataset=None,
         args=training_args,
         data_collator=data_collator,
     )
