@@ -9,9 +9,15 @@ import torch
 import transformers
 from datasets import load_dataset
 from peft import LoraConfig, PeftConfig, PeftModel, get_peft_model
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          DataCollatorWithPadding, PreTrainedTokenizerBase,
-                          Trainer, TrainingArguments)
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    DataCollatorWithPadding,
+    PreTrainedTokenizerBase,
+    Trainer,
+    TrainingArguments,
+)
 
 # Constants
 CACHE_DIRECTORY = "./cache/"
@@ -52,15 +58,23 @@ class LoraArguments:
     lora_dropout: float = field(default=0.0)
     target_modules: List[str] = field(
         default_factory=lambda: [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
+            # "q_proj",
+            # "k_proj",
+            # "v_proj",
+            # "o_proj",
+            # "gate_proj",
+            # "up_proj",
+            # "down_proj",
+            "c_proj",
         ]
     )
+
+
+@dataclass
+class QuantizationArguments:
+    use_quant: bool = field(default=False)
+    bnb_4bit_quant_type: str = field(default="nf4")
+    bnb_4bit_compute_dtype: torch.dtype = field(default=torch.bfloat16)
 
 
 @dataclass
@@ -184,35 +198,59 @@ def initialize_tokenizer(model_name):
 
 def train():
     parser = transformers.HfArgumentParser(
-        (ModelArguments, TrainingArguments, RunningArguments, LoraArguments)
+        (
+            ModelArguments,
+            TrainingArguments,
+            RunningArguments,
+            LoraArguments,
+            QuantizationArguments,
+        )
     )
     (
         model_args,
         training_args,
         running_args,
         lora_args,
+        quant_args,
     ) = parser.parse_args_into_dataclasses()
     tokenizer = initialize_tokenizer(model_args.model_name_or_path)
     train_dataset = data_processing(tokenizer, running_args.training_mode)
     data_collator = CustomDataCollator(tokenizer)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=f"{CACHE_DIRECTORY}/models/",
-        trust_remote_code=True,
-    )
+
+    # set up for quantization
+    if quant_args.use_quant:
+        print("Using 4bit quantization for training.")
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=quant_args.bnb_4bit_quant_type,
+            bnb_4bit_compute_dtype=quant_args.bnb_4bit_compute_dtype,
+        )
+        breakpoint()
+        model = AutoModelForCausalLM.from_pretrained(
+            model_args.model_name_or_path,
+            cache_dir=f"{CACHE_DIRECTORY}/models/",
+            trust_remote_code=True,
+            quantization_config=quant_config,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_args.model_name_or_path,
+            cache_dir=f"{CACHE_DIRECTORY}/models/",
+            trust_remote_code=True,
+        )
 
     model.resize_token_embeddings(len(tokenizer))
 
     # set up for lora
     if lora_args.use_lora:
         print("Using lora for training.")
-        config = LoraConfig(
+        lora_config = LoraConfig(
             r=lora_args.lora_r,
             lora_alpha=lora_args.lora_alpha,
             lora_dropout=lora_args.lora_dropout,
             target_modules=lora_args.target_modules,
         )
-        model = get_peft_model(model, config)
+        model = get_peft_model(model, lora_config)
 
     trainer = Trainer(
         model=model,
