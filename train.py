@@ -1,20 +1,24 @@
 """
-LLM Training code modified from https://github.com/tatsu-lab/stanford_alpaca/blob/main/train.py
+LLM Training code modified from:
+1. https://github.com/tatsu-lab/stanford_alpaca/blob/main/train.py
+2. https://huggingface.co/blog/4bit-transformers-bitsandbytes
 """
 import copy
+import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import torch
 import transformers
+import yaml
 from datasets import load_dataset
-from peft import LoraConfig, PeftConfig, PeftModel, get_peft_model
+from peft import LoraConfig, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
     DataCollatorWithPadding,
-    PreTrainedTokenizerBase,
     Trainer,
     TrainingArguments,
 )
@@ -56,18 +60,7 @@ class LoraArguments:
     lora_r: int = field(default=64)
     lora_alpha: int = field(default=128)
     lora_dropout: float = field(default=0.0)
-    target_modules: List[str] = field(
-        default_factory=lambda: [
-            # "q_proj",
-            # "k_proj",
-            # "v_proj",
-            # "o_proj",
-            # "gate_proj",
-            # "up_proj",
-            # "down_proj",
-            "c_proj",
-        ]
-    )
+    target_modules: Optional[List[str]] = None
 
 
 @dataclass
@@ -102,6 +95,24 @@ class TrainingArguments(TrainingArguments):
     # Training Process and Logging
     logging_steps: int = field(default=50)
     fp16: bool = field(default=True)
+
+
+def load_lora_model_modules(lora_args: Any, model_type_str: str):
+    """
+    Load target modules for a LoRa model from a YAML file if lora_args.target_modules is None.
+    Uses regex to find a matching key in the YAML file (case-insensitive).
+    """
+    if lora_args.target_modules is None and os.path.exists("./target_modules.yml"):
+        with open("./target_modules.yml", "r") as file:
+            lora_models = yaml.safe_load(file)
+            # Find the first matching key in the YAML file (case-insensitive)
+            for key in lora_models.keys():
+                if re.search(key, model_type_str, re.IGNORECASE):
+                    lora_args.target_modules = lora_models[key]["target_modules"]
+                    return None
+
+    # Default to ['c_proj'] if no match is found
+    lora_args.target_modules = ["c_proj"]
 
 
 def pair_tokenize(sample, tokenizer):
@@ -225,7 +236,6 @@ def train():
             bnb_4bit_quant_type=quant_args.bnb_4bit_quant_type,
             bnb_4bit_compute_dtype=quant_args.bnb_4bit_compute_dtype,
         )
-        breakpoint()
         model = AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=f"{CACHE_DIRECTORY}/models/",
@@ -242,8 +252,12 @@ def train():
     model.resize_token_embeddings(len(tokenizer))
 
     # set up for lora
-    if lora_args.use_lora:
+    if (
+        lora_args.use_lora or quant_args.use_quant
+    ):  # if quantization is used, lora has to be used
         print("Using lora for training.")
+        # Load target modules for Lora
+        load_lora_model_modules(lora_args, str(type(model)))
         lora_config = LoraConfig(
             r=lora_args.lora_r,
             lora_alpha=lora_args.lora_alpha,
