@@ -3,7 +3,7 @@ gpt2:
     - c_proj
     - c_fc
 
-TinyLlama/TinyLlama-1.1B-Chat-v1.0:
+llama:
   target_modules:
     - q_proj
     - k_proj
