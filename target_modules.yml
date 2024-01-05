@@ -1,0 +1,15 @@
+gpt2:
+  target_modules:
+    - c_proj
+    - c_fc
+
+TinyLlama/TinyLlama-1.1B-Chat-v1.0:
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
